@@ -1,0 +1,105 @@
+From 63a691264fc445bdacaa620c09c7f0ae2b90cc90 Mon Sep 17 00:00:00 2001
+From: xiaodouzi666 <j.liu.86@student.rug.nl>
+Date: Sun, 24 Aug 2025 16:29:01 +0800
+Subject: [PATCH] Add multi-step scheduling and HIP Graph optimization for
+ ROCm/MI300X
+
+---
+ vllm/engine/arg_utils.py | 61 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 61 insertions(+)
+
+diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
+index 4700a93dd..5ed0ff55a 100644
+--- a/vllm/engine/arg_utils.py
++++ b/vllm/engine/arg_utils.py
+@@ -3,6 +3,11 @@
+ 
+ # yapf: disable
+ import argparse
++import os
++try:
++    import torch
++except Exception:
++    torch = None
+ import copy
+ import dataclasses
+ import functools
+@@ -478,6 +483,12 @@ class EngineArgs:
+             title="ModelConfig",
+             description=ModelConfig.__doc__,
+         )
++        _env_max_cap = os.getenv("VLLM_MAX_SEQ_LEN_TO_CAPTURE")
++        if _env_max_cap:
++            try:
++                model_kwargs["max_seq_len_to_capture"]["default"] = int(_env_max_cap)
++            except Exception:
++                pass
+         if not ('serve' in sys.argv[1:] and '--help' in sys.argv[1:]):
+             model_group.add_argument("--model", **model_kwargs["model"])
+         model_group.add_argument("--runner", **model_kwargs["runner"])
+@@ -823,6 +834,28 @@ class EngineArgs:
+             title="SchedulerConfig",
+             description=SchedulerConfig.__doc__,
+         )
++        _env_sizes = os.getenv("VLLM_CUDA_GRAPH_SIZES")
++        if _env_sizes:
++            try:
++                # 允许格式：'4096,8192' 或 '4096 8192'
++                _sizes = [int(x) for x in _env_sizes.replace(",", " ").split() if x]
++                scheduler_kwargs["cuda_graph_sizes"]["default"] = _sizes
++            except Exception:
++                pass
++
++        _env_lookahead = os.getenv("VLLM_NUM_LOOKAHEAD_SLOTS")
++        if _env_lookahead:
++            try:
++                scheduler_kwargs["num_lookahead_slots"]["default"] = int(_env_lookahead)
++            except Exception:
++                pass
++        else:
++            try:
++                if torch is not None and getattr(torch.version, "hip", None):
++                    scheduler_kwargs["num_lookahead_slots"]["default"] = 12
++            except Exception:
++                pass
+         scheduler_group.add_argument(
+             "--max-num-batched-tokens",
+             **scheduler_kwargs["max_num_batched_tokens"])
+@@ -1124,6 +1157,34 @@ class EngineArgs:
+             self._set_default_args_v0(model_config)
+         assert self.enable_chunked_prefill is not None
+ 
++        _env_max_cap = os.getenv("VLLM_MAX_SEQ_LEN_TO_CAPTURE")
++        if _env_max_cap:
++            try:
++                self.max_seq_len_to_capture = int(_env_max_cap)
++            except Exception:
++                pass
++
++        _env_sizes = os.getenv("VLLM_CUDA_GRAPH_SIZES")
++        if _env_sizes:
++            try:
++                self.cuda_graph_sizes = [int(x) for x in _env_sizes.replace(",", " ").split() if x]
++            except Exception:
++                pass
++
++        _env_lookahead = os.getenv("VLLM_NUM_LOOKAHEAD_SLOTS")
++        if _env_lookahead:
++            try:
++                self.num_lookahead_slots = int(_env_lookahead)
++            except Exception:
++                pass
++        else:
++            # ROCm 默认 12（用户未显式指定时）
++            try:
++                if torch is not None and getattr(torch.version, "hip", None):
++                    self.num_lookahead_slots = 12
++            except Exception:
++                pass
++
+         if envs.VLLM_ATTENTION_BACKEND in [STR_DUAL_CHUNK_FLASH_ATTN_VAL]:
+             assert self.enforce_eager, (
+                 "Cuda graph is not supported with DualChunkFlashAttention. "
+-- 
+2.48.1
+
